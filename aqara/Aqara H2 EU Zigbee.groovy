@@ -1,3 +1,23 @@
+/**
+ * Aqara H2 EU (WS-K08E) Zigbee Driver
+ * 
+ * Device: Aqara H2 EU Double Switch with Power Monitoring (lumi.switch.agl010)
+ * Author: Adrian Dobre
+ * 
+ * Features:
+ * - Dual relay control with child devices
+ * - Power, voltage, current, energy monitoring
+ * - Multi-click button support (push, double-tap, hold)
+ * - Configurable modes: decoupled mode, relay lock, LED indicators
+ * - Power outage counter
+ * - Temperature sensor
+ * 
+ * Notes:
+ * - Power measurement uses genAnalogInput cluster (0x000C) per zigbee-herdsman-converters
+ * - Device requires manual driver selection on first pairing (Aqara limitation)
+ * - Child relay devices created automatically on install/configure
+ */
+
 metadata {
     definition (name: "Aqara H2 EU", namespace: "madtek", author: "Adrian Dobre") {
         capability "Configuration"
@@ -17,14 +37,16 @@ metadata {
         attribute "powerOutageCount", "number"
         attribute "relay1", "string"
         attribute "relay2", "string"
+        attribute "powerOnBehaviorRelay1", "string"
+        attribute "powerOnBehaviorRelay2", "string"
+        attribute "ledMode", "string"
         attribute "multiClickButton1", "string"
         attribute "multiClickButton2", "string"
         attribute "decoupledModeRelay1", "string"
         attribute "decoupledModeRelay2", "string"
         attribute "relayLockRelay1", "string"
         attribute "relayLockRelay2", "string"
-        attribute "ledIndicatorRelay1", "string"
-        attribute "ledIndicatorRelay2", "string"
+        attribute "ledIndicator", "string"
         
         command "multiClickButton1", [[name: "Enable Multi-Click Button 1", type: "ENUM", constraints: ["off", "on"]]]
         command "multiClickButton2", [[name: "Enable Multi-Click Button 2", type: "ENUM", constraints: ["off", "on"]]]
@@ -32,8 +54,10 @@ metadata {
         command "decoupledModeRelay2", [[name: "Decouple Relay 2 (ON = Decoupled)", type: "ENUM", constraints: ["off", "on"]]]
         command "relayLockRelay1", [[name: "Lock Relay 1", type: "ENUM", constraints: ["off", "on"]]]
         command "relayLockRelay2", [[name: "Lock Relay 2", type: "ENUM", constraints: ["off", "on"]]]
-        command "ledIndicatorRelay1", [[name: "LED Indicator Relay 1", type: "ENUM", constraints: ["off", "on"]]]
-        command "ledIndicatorRelay2", [[name: "LED Indicator Relay 2", type: "ENUM", constraints: ["off", "on"]]]
+        command "ledIndicator", [[name: "LED Indicator", type: "ENUM", constraints: ["off", "on"]]]
+        command "powerOnBehaviorRelay1", [[name: "Power On Behavior Relay 1", type: "ENUM", constraints: ["on", "previous", "off"]]]
+        command "powerOnBehaviorRelay2", [[name: "Power On Behavior Relay 2", type: "ENUM", constraints: ["on", "previous", "off"]]]
+        command "ledMode", [[name: "LED Mode", type: "ENUM", constraints: ["normal", "inverted"]]]
 
         command "createChildDevices"
         command "componentOn"
@@ -42,7 +66,13 @@ metadata {
         fingerprint profileId: "0104", inClusters: "0000,0003,0004,0005,0006,0009,0702,0B04,FCC0", outClusters: "0019,000A", manufacturer: "LUMI", model: "lumi.switch.agl010", deviceJoinName: "Aqara H2 EU Double Switch"
         fingerprint profileId: "0104", manufacturer: "LUMI", model: "lumi.switch.agl010", deviceJoinName: "Aqara H2 EU Double Switch"
     }
+    
+    preferences {
+        input name: "logEnable", type: "bool", title: "Enable debug logging", defaultValue: false
+    }
 }
+
+// ===== Lifecycle Methods =====
 
 def installed() {
     log.info "Aqara H2 EU installed"
@@ -53,7 +83,20 @@ def installed() {
 def updated() {
     log.info "Aqara H2 EU updated"
     createChildDevices()
+    
+    // Auto-disable debug logging after 30 minutes
+    if (logEnable) {
+        log.warn "Debug logging enabled for 30 minutes"
+        runIn(1800, "logsOff")
+    }
 }
+
+def logsOff() {
+    log.warn "Debug logging disabled"
+    device.updateSetting("logEnable", [value: "false", type: "bool"])
+}
+
+// ===== Message Parsing =====
 
 def parse(String description) {
     if (logEnable) log.debug "RAW: ${description}"
@@ -71,7 +114,7 @@ def parse(String description) {
     else if (cluster == "FCC0" && attrId == "0002") {
         decodeAqaraOutageAttr(descMap.value)
     }
-    else if (cluster == "FCC0" && ["0286", "0200", "0285", "0203"].contains(attrId)) {
+    else if (cluster == "FCC0" && ["0286", "0200", "0285", "0203", "0517", "00F0"].contains(attrId)) {
         decodeEndpointSetting(descMap)
     }
 
@@ -115,6 +158,8 @@ def parse(String description) {
     }
 }
 
+// ===== Decoder Methods =====
+
 def decodeAqaraOutageAttr(String valueHex) {
     try {
         long raw = Long.parseLong(valueHex, 16)
@@ -126,10 +171,12 @@ def decodeAqaraOutageAttr(String valueHex) {
 
 def decodePowerMeasurement(Map descMap) {
     try {
-        // genAnalogInput cluster presentValue - primary power source (no scaling per upstream)
+        // IMPORTANT: This device uses genAnalogInput (0x000C/0x0055) for power measurement,
+        // NOT haElectricalMeasurement (0x0B04/0x050B) which is only a fallback.
+        // This matches the upstream zigbee-herdsman-converters implementation.
+        // Value is IEEE 754 single precision float with NO scaling/divisor applied.
         def raw = descMap.value
         if (raw) {
-            // Parse as IEEE 754 single precision float (encoding 39)
             long bits = Long.parseLong(swapEndianHex(raw), 16)
             float watts = Float.intBitsToFloat(bits.intValue())
             if (watts >= 0 && watts < 20000) {
@@ -169,11 +216,23 @@ def decodeEndpointSetting(Map descMap) {
             }
         }
         else if (attrId == "0203") {
-            if (endpoint == "01") {
-                updateSettingState("ledIndicatorRelay1", raw == 1 ? "on" : "off")
-            } else if (endpoint == "02") {
-                updateSettingState("ledIndicatorRelay2", raw == 1 ? "on" : "off")
+            def ledValue = raw == 1 ? "on" : "off"
+            // LED indicator is a global setting for this device
+            updateSettingState("ledIndicator", ledValue)
+        }
+        else if (attrId == "0517") {
+            def behavior = raw == 0 ? "on" : (raw == 1 ? "previous" : (raw == 2 ? "off" : null))
+            if (behavior) {
+                if (endpoint == "01") {
+                    updateSettingState("powerOnBehaviorRelay1", behavior, ["on", "previous", "off"])
+                } else if (endpoint == "02") {
+                    updateSettingState("powerOnBehaviorRelay2", behavior, ["on", "previous", "off"])
+                }
             }
+        }
+        else if (attrId == "00F0") {
+            def mode = raw == 1 ? "inverted" : "normal"
+            updateSettingState("ledMode", mode, ["normal", "inverted"])
         }
     } catch (e) {
         log.error "Decoding endpoint setting error: ${e}"
@@ -301,6 +360,8 @@ def decodeXiaomiStruct(String hexString) {
     }
 }
 
+// ===== Helper Methods =====
+
 private void updatePowerOutageCount(long count) {
     if (count < 0) return
     def current = device.currentValue("powerOutageCount")
@@ -309,8 +370,10 @@ private void updatePowerOutageCount(long count) {
     }
 }
 
-private void updateSettingState(String attributeName, String value) {
-    if (!(value in ["on", "off"])) return
+private void updateSettingState(String attributeName, String value, List allowedValues = null) {
+    if (value == null) return
+    def allowed = allowedValues ?: ["on", "off"]
+    if (!(value in allowed)) return
     if (device.currentValue(attributeName) != value) {
         sendEvent(name: attributeName, value: value)
     }
@@ -353,36 +416,50 @@ private String swapEndianHex(String hex) {
     return reversed
 }
 
+// ===== Refresh and Configuration =====
+
 def refresh() {
     log.info "Refreshing all sensor data..."
     return (
-        zigbee.readAttribute(0x000C, 0x0055) +
-        zigbee.readAttribute(0x0B04, 0x0508) +
-        zigbee.readAttribute(0xFCC0, 0x0002, [mfgCode: "0x115F"]) +
-        zigbee.readAttribute(0xFCC0, 0x00F7, [mfgCode: "0x115F"]) +
-        zigbee.readAttribute(0xFCC0, 0xFFF2, [mfgCode: "0x115F"]) +
-        zigbee.readAttribute(0x0000, 0xFF01, [mfgCode: "0x115F"]) +
-        zigbee.readAttribute(0x0000, 0xFF02, [mfgCode: "0x115F"]) +
-        zigbee.readAttribute(0xFCC0, 0x0286, [mfgCode: "0x115F", destEndpoint: 0x04]) +
-        zigbee.readAttribute(0xFCC0, 0x0286, [mfgCode: "0x115F", destEndpoint: 0x05]) +
-        zigbee.readAttribute(0xFCC0, 0x0200, [mfgCode: "0x115F", destEndpoint: 0x01]) +
-        zigbee.readAttribute(0xFCC0, 0x0200, [mfgCode: "0x115F", destEndpoint: 0x02]) +
-        zigbee.readAttribute(0xFCC0, 0x0285, [mfgCode: "0x115F", destEndpoint: 0x01]) +
-        zigbee.readAttribute(0xFCC0, 0x0285, [mfgCode: "0x115F", destEndpoint: 0x02]) +
-        zigbee.readAttribute(0xFCC0, 0x0203, [mfgCode: "0x115F", destEndpoint: 0x01]) +
-        zigbee.readAttribute(0xFCC0, 0x0203, [mfgCode: "0x115F", destEndpoint: 0x02])
+        // Power measurements
+        zigbee.readAttribute(0x000C, 0x0055) +                                           // Power (genAnalogInput)
+        zigbee.readAttribute(0x0B04, 0x0508) +                                           // Current
+        
+        // Aqara custom telemetry
+        zigbee.readAttribute(0xFCC0, 0x0002, [mfgCode: "0x115F"]) +                      // Outage count
+        zigbee.readAttribute(0xFCC0, 0x00F7, [mfgCode: "0x115F"]) +                      // Custom struct (temp, power, energy, current)
+        zigbee.readAttribute(0xFCC0, 0xFFF2, [mfgCode: "0x115F"]) +                      // Voltage struct
+        
+        // Xiaomi structs
+        zigbee.readAttribute(0x0000, 0xFF01, [mfgCode: "0x115F"]) +                      // Xiaomi struct 1
+        zigbee.readAttribute(0x0000, 0xFF02, [mfgCode: "0x115F"]) +                      // Xiaomi struct 2
+        
+        // Device settings
+        zigbee.readAttribute(0xFCC0, 0x0286, [mfgCode: "0x115F", destEndpoint: 0x04]) +  // Multi-click button 1
+        zigbee.readAttribute(0xFCC0, 0x0286, [mfgCode: "0x115F", destEndpoint: 0x05]) +  // Multi-click button 2
+        zigbee.readAttribute(0xFCC0, 0x0200, [mfgCode: "0x115F", destEndpoint: 0x01]) +  // Decoupled mode relay 1
+        zigbee.readAttribute(0xFCC0, 0x0200, [mfgCode: "0x115F", destEndpoint: 0x02]) +  // Decoupled mode relay 2
+        zigbee.readAttribute(0xFCC0, 0x0285, [mfgCode: "0x115F", destEndpoint: 0x01]) +  // Relay lock 1
+        zigbee.readAttribute(0xFCC0, 0x0285, [mfgCode: "0x115F", destEndpoint: 0x02]) +  // Relay lock 2
+        zigbee.readAttribute(0xFCC0, 0x0203, [mfgCode: "0x115F", destEndpoint: 0x01]) +  // LED indicator
+        zigbee.readAttribute(0xFCC0, 0x0517, [mfgCode: "0x115F", destEndpoint: 0x01]) +  // Power on behavior relay 1
+        zigbee.readAttribute(0xFCC0, 0x0517, [mfgCode: "0x115F", destEndpoint: 0x02]) +  // Power on behavior relay 2
+        zigbee.readAttribute(0xFCC0, 0x00F0, [mfgCode: "0x115F", destEndpoint: 0x01])    // LED mode (normal/inverted)
     )
 }
 
-// Commands
+// ===== Device Commands =====
+
 def multiClickButton1(state) { setMultiClickMode("04", state) }
 def multiClickButton2(state) { setMultiClickMode("05", state) }
 def decoupledModeRelay1(state) { setOperationMode("01", state) }
 def decoupledModeRelay2(state) { setOperationMode("02", state) }
 def relayLockRelay1(state) { setLockRelay("01", state) }
 def relayLockRelay2(state) { setLockRelay("02", state) }
-def ledIndicatorRelay1(state) { setLedIndicator("01", state) }
-def ledIndicatorRelay2(state) { setLedIndicator("02", state) }
+def ledIndicator(state) { setLedIndicator(state) }
+def powerOnBehaviorRelay1(state) { setPowerOnBehavior("01", state) }
+def powerOnBehaviorRelay2(state) { setPowerOnBehavior("02", state) }
+def ledMode(state) { setLedMode(state) }
 
 def setMultiClickMode(ep, state) {
     int endpoint = Integer.parseInt(ep, 16)
@@ -417,16 +494,33 @@ def setLockRelay(ep, state) {
         updateSettingState("relayLockRelay2", locked ? "on" : "off")
     }
 }
-def setLedIndicator(ep, state) {
-    int endpoint = Integer.parseInt(ep, 16)
+def setLedIndicator(state) {
+    int endpoint = 1
     boolean enabled = state in ["on", true]
     int val = enabled ? 1 : 0
     sendHubCommand(new hubitat.device.HubMultiAction(zigbee.writeAttribute(0xFCC0, 0x0203, 0x10, val, [mfgCode: "0x115F", destEndpoint: endpoint]), hubitat.device.Protocol.ZIGBEE))
+    updateSettingState("ledIndicator", enabled ? "on" : "off")
+}
+
+def setPowerOnBehavior(ep, state) {
+    int endpoint = Integer.parseInt(ep, 16)
+    def behaviorMap = [on: 0, previous: 1, off: 2]
+    if (!behaviorMap.containsKey(state)) return
+    int val = behaviorMap[state]
+    sendHubCommand(new hubitat.device.HubMultiAction(zigbee.writeAttribute(0xFCC0, 0x0517, 0x20, val, [mfgCode: "0x115F", destEndpoint: endpoint]), hubitat.device.Protocol.ZIGBEE))
     if (endpoint == 1) {
-        updateSettingState("ledIndicatorRelay1", enabled ? "on" : "off")
+        updateSettingState("powerOnBehaviorRelay1", state, ["on", "previous", "off"])
     } else if (endpoint == 2) {
-        updateSettingState("ledIndicatorRelay2", enabled ? "on" : "off")
+        updateSettingState("powerOnBehaviorRelay2", state, ["on", "previous", "off"])
     }
+}
+
+def setLedMode(state) {
+    def modeMap = [normal: 0, inverted: 1]
+    if (!modeMap.containsKey(state)) return
+    int val = modeMap[state]
+    sendHubCommand(new hubitat.device.HubMultiAction(zigbee.writeAttribute(0xFCC0, 0x00F0, 0x20, val, [mfgCode: "0x115F", destEndpoint: 0x01]), hubitat.device.Protocol.ZIGBEE))
+    updateSettingState("ledMode", state, ["normal", "inverted"])
 }
 def configure() {
     log.info "Configuring Aqara H2 EU..."
@@ -437,6 +531,9 @@ def getInfo() {
     log.info "Getting device info..."
     return zigbee.readAttribute(0x0000, 0x0004) + zigbee.readAttribute(0x0000, 0x0005)
 }
+
+// ===== Component Device Methods =====
+
 def sendButtonEvent(btn, type) { sendEvent(name: type, value: btn, isStateChange: true) }
 def on() { componentOn(getChildDevice("${device.deviceNetworkId}-ep01")) }
 def off() { componentOff(getChildDevice("${device.deviceNetworkId}-ep01")) }
