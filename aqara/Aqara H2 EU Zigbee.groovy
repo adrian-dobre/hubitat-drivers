@@ -1,11 +1,5 @@
-/**
- * Aqara H2 EU (WS-K08E) - v38.0
- * FIXED: Isolated Power (W) from Voltage (V) to prevent 2.1W overwriting 230V.
- * FIXED: Refined Tag 98 decoding for precise Line Voltage.
- */
-
 metadata {
-    definition (name: "Aqara H2 EU Z2M Pro", namespace: "custom", author: "Gemini") {
+    definition (name: "Aqara H2 EU", namespace: "madtek", author: "Adrian Dobre") {
         capability "Configuration"
         capability "Refresh"
         capability "PushableButton"
@@ -21,25 +15,51 @@ metadata {
         attribute "amperage", "number"
         attribute "voltage", "number"
         attribute "powerOutageCount", "number"
+        attribute "relay1", "string"
+        attribute "relay2", "string"
+        attribute "multiClickButton1", "string"
+        attribute "multiClickButton2", "string"
+        attribute "decoupledModeRelay1", "string"
+        attribute "decoupledModeRelay2", "string"
+        attribute "relayLockRelay1", "string"
+        attribute "relayLockRelay2", "string"
+        attribute "ledIndicatorRelay1", "string"
+        attribute "ledIndicatorRelay2", "string"
         
-        command "setMultiClickMode", [[name: "Endpoint", type: "ENUM", constraints: ["04", "05"]], [name: "State", type: "ENUM", constraints: ["enabled", "disabled"]]]
-        command "setOperationMode", [[name: "Endpoint", type: "ENUM", constraints: ["01", "02"]], [name: "Mode", type: "ENUM", constraints: ["control", "decoupled"]]]
-        command "setLockRelay", [[name: "Endpoint", type: "ENUM", constraints: ["01", "02"]], [name: "State", type: "ENUM", constraints: ["unlocked", "locked"]]]
-        command "setLedIndicator", [[name: "Endpoint", type: "ENUM", constraints: ["01", "02"]], [name: "State", type: "ENUM", constraints: ["off", "on"]]]
+        command "multiClickButton1", [[name: "Enable Multi-Click Button 1", type: "ENUM", constraints: ["off", "on"]]]
+        command "multiClickButton2", [[name: "Enable Multi-Click Button 2", type: "ENUM", constraints: ["off", "on"]]]
+        command "decoupledModeRelay1", [[name: "Decouple Relay 1 (ON = Decoupled)", type: "ENUM", constraints: ["off", "on"]]]
+        command "decoupledModeRelay2", [[name: "Decouple Relay 2 (ON = Decoupled)", type: "ENUM", constraints: ["off", "on"]]]
+        command "relayLockRelay1", [[name: "Lock Relay 1", type: "ENUM", constraints: ["off", "on"]]]
+        command "relayLockRelay2", [[name: "Lock Relay 2", type: "ENUM", constraints: ["off", "on"]]]
+        command "ledIndicatorRelay1", [[name: "LED Indicator Relay 1", type: "ENUM", constraints: ["off", "on"]]]
+        command "ledIndicatorRelay2", [[name: "LED Indicator Relay 2", type: "ENUM", constraints: ["off", "on"]]]
 
         command "createChildDevices"
         command "componentOn"
         command "componentOff"
 
-        fingerprint profileId: "0104", endpointId: "01", inClusters: "0000,0003,0004,0005,0006,0009,0702,0B04,FCC0", outClusters: "0019,000A", manufacturer: "LUMI", model: "lumi.switch.agl010"
+        fingerprint profileId: "0104", inClusters: "0000,0003,0004,0005,0006,0009,0702,0B04,FCC0", outClusters: "0019,000A", manufacturer: "LUMI", model: "lumi.switch.agl010", deviceJoinName: "Aqara H2 EU Double Switch"
+        fingerprint profileId: "0104", manufacturer: "LUMI", model: "lumi.switch.agl010", deviceJoinName: "Aqara H2 EU Double Switch"
     }
+}
+
+def installed() {
+    log.info "Aqara H2 EU installed"
+    sendEvent(name: "numberOfButtons", value: 2)
+    createChildDevices()
+}
+
+def updated() {
+    log.info "Aqara H2 EU updated"
+    createChildDevices()
 }
 
 def parse(String description) {
     if (logEnable) log.debug "RAW: ${description}"
     def descMap = zigbee.parseDescriptionAsMap(description)
     String cluster = descMap.cluster?.toUpperCase()
-    String attrId = descMap.attrId?.toUpperCase()
+    String attrId = descMap.attrId?.toUpperCase()?.padLeft(4, '0')
     
     // 1. AQARA CUSTOM STRUCTURE (VOLTAGE / ENERGY / AMPS)
     if (cluster == "FCC0" && attrId == "00F7") {
@@ -51,18 +71,26 @@ def parse(String description) {
     else if (cluster == "FCC0" && attrId == "0002") {
         decodeAqaraOutageAttr(descMap.value)
     }
+    else if (cluster == "FCC0" && ["0286", "0200", "0285", "0203"].contains(attrId)) {
+        decodeEndpointSetting(descMap)
+    }
 
     // 1b. XIAOMI/AQARA BASIC STRUCTURE (OUTAGE COUNT + AUX METRICS)
     else if (cluster == "0000" && (attrId == "FF01" || attrId == "FF02")) {
         decodeXiaomiStruct(descMap.value)
     }
     
-    // 2. ELECTRICAL MEASUREMENTS (VOLTAGE / CURRENT / POWER)
+    // 2. POWER MEASUREMENT (PRIMARY SOURCE: genAnalogInput)
+    else if (cluster == "000C" && attrId == "0055") {
+        decodePowerMeasurement(descMap)
+    }
+    
+    // 3. ELECTRICAL MEASUREMENTS (VOLTAGE / CURRENT / POWER FALLBACK)
     else if (cluster == "0B04") {
         decodeElectricalMeasurement(descMap)
     }
     
-    // 3. MULTI-CLICK BUTTONS
+    // 4. MULTI-CLICK BUTTONS
     else if (cluster == "0012") {
         int ep = Integer.parseInt(descMap.endpoint, 16)
         int btn = (ep == 1 || ep == 4) ? 1 : 2
@@ -72,13 +100,18 @@ def parse(String description) {
         else if (val == 0) sendButtonEvent(btn, "held")
     }
     
-    // 4. RELAY STATUS
+    // 5. RELAY STATUS
     else if (cluster == "0006") {
         def ep = descMap.endpoint
         def value = (descMap.value == "01" || descMap.command == "01") ? "on" : "off"
         def child = getChildDevice("${device.deviceNetworkId}-ep${ep}")
         if (child) child.parse([[name: "switch", value: value]])
-        if (ep == "01") sendEvent(name: "switch", value: value)
+        if (ep == "01") {
+            sendEvent(name: "switch", value: value)
+            sendEvent(name: "relay1", value: value)
+        } else if (ep == "02") {
+            sendEvent(name: "relay2", value: value)
+        }
     }
 }
 
@@ -88,6 +121,62 @@ def decodeAqaraOutageAttr(String valueHex) {
         updatePowerOutageCount(Math.max(0, raw - 1))
     } catch (e) {
         log.error "Decoding 0002 error: ${e}"
+    }
+}
+
+def decodePowerMeasurement(Map descMap) {
+    try {
+        // genAnalogInput cluster presentValue - primary power source (no scaling per upstream)
+        def raw = descMap.value
+        if (raw) {
+            // Parse as IEEE 754 single precision float (encoding 39)
+            long bits = Long.parseLong(swapEndianHex(raw), 16)
+            float watts = Float.intBitsToFloat(bits.intValue())
+            if (watts >= 0 && watts < 20000) {
+                sendEvent(name: "power", value: watts.round(1), unit: "W", descriptionText: "Power is ${watts.round(1)} W")
+            }
+        }
+    } catch (e) {
+        log.error "Decoding genAnalogInput power error: ${e}"
+    }
+}
+
+def decodeEndpointSetting(Map descMap) {
+    try {
+        String attrId = descMap.attrId?.toUpperCase()?.padLeft(4, '0')
+        String endpoint = descMap.endpoint?.toUpperCase()?.padLeft(2, '0')
+        long raw = Long.parseLong(descMap.value ?: "0", 16)
+
+        if (attrId == "0286") {
+            if (endpoint == "04") {
+                updateSettingState("multiClickButton1", raw == 2 ? "on" : "off")
+            } else if (endpoint == "05") {
+                updateSettingState("multiClickButton2", raw == 2 ? "on" : "off")
+            }
+        }
+        else if (attrId == "0200") {
+            if (endpoint == "01") {
+                updateSettingState("decoupledModeRelay1", raw == 0 ? "on" : "off")
+            } else if (endpoint == "02") {
+                updateSettingState("decoupledModeRelay2", raw == 0 ? "on" : "off")
+            }
+        }
+        else if (attrId == "0285") {
+            if (endpoint == "01") {
+                updateSettingState("relayLockRelay1", raw == 1 ? "on" : "off")
+            } else if (endpoint == "02") {
+                updateSettingState("relayLockRelay2", raw == 1 ? "on" : "off")
+            }
+        }
+        else if (attrId == "0203") {
+            if (endpoint == "01") {
+                updateSettingState("ledIndicatorRelay1", raw == 1 ? "on" : "off")
+            } else if (endpoint == "02") {
+                updateSettingState("ledIndicatorRelay2", raw == 1 ? "on" : "off")
+            }
+        }
+    } catch (e) {
+        log.error "Decoding endpoint setting error: ${e}"
     }
 }
 
@@ -120,7 +209,7 @@ def decodeAqaraStruct(hexString) {
             def sub = hexString.split("0328")[1]
             sendEvent(name: "temperature", value: Integer.parseInt(sub.substring(0,2), 16), unit: "°C")
         }
-        // INSTANT POWER FALLBACK (Tag 98)
+        // INSTANT POWER SECONDARY (Tag 98 / 0x98 / key 152)
         if (hexString.contains("9839")) {
             def sub = hexString.split("9839")[1]
             long val = Long.parseLong(swapEndianHex(sub.substring(0,8)), 16)
@@ -129,14 +218,14 @@ def decodeAqaraStruct(hexString) {
                 sendEvent(name: "power", value: fVal.round(1), unit: "W")
             }
         }
-        // ENERGY (Tag 95)
+        // ENERGY (Tag 95 / 0x95 / key 149)
         if (hexString.contains("9539")) {
             def sub = hexString.split("9539")[1]
             long val = Long.parseLong(swapEndianHex(sub.substring(0,8)), 16)
             float fVal = Float.intBitsToFloat(val.intValue())
             sendEvent(name: "energy", value: fVal.round(3), unit: "kWh")
         }
-        // AMPS (Tag 97)
+        // CURRENT (Tag 97 / 0x97 / key 151 - scaling × 0.001)
         if (hexString.contains("9739")) {
             def sub = hexString.split("9739")[1]
             long val = Long.parseLong(swapEndianHex(sub.substring(0,8)), 16)
@@ -220,6 +309,13 @@ private void updatePowerOutageCount(long count) {
     }
 }
 
+private void updateSettingState(String attributeName, String value) {
+    if (!(value in ["on", "off"])) return
+    if (device.currentValue(attributeName) != value) {
+        sendEvent(name: attributeName, value: value)
+    }
+}
+
 private int zigbeeTypeByteLength(int dataType, String hexString, int dataStartIdx) {
     switch (dataType) {
         case 0x10:
@@ -260,37 +356,101 @@ private String swapEndianHex(String hex) {
 def refresh() {
     log.info "Refreshing all sensor data..."
     return (
+        zigbee.readAttribute(0x000C, 0x0055) +
         zigbee.readAttribute(0x0B04, 0x0508) +
-        zigbee.readAttribute(0x0B04, 0x050B) +
         zigbee.readAttribute(0xFCC0, 0x0002, [mfgCode: "0x115F"]) +
         zigbee.readAttribute(0xFCC0, 0x00F7, [mfgCode: "0x115F"]) +
         zigbee.readAttribute(0xFCC0, 0xFFF2, [mfgCode: "0x115F"]) +
         zigbee.readAttribute(0x0000, 0xFF01, [mfgCode: "0x115F"]) +
-        zigbee.readAttribute(0x0000, 0xFF02, [mfgCode: "0x115F"])
+        zigbee.readAttribute(0x0000, 0xFF02, [mfgCode: "0x115F"]) +
+        zigbee.readAttribute(0xFCC0, 0x0286, [mfgCode: "0x115F", destEndpoint: 0x04]) +
+        zigbee.readAttribute(0xFCC0, 0x0286, [mfgCode: "0x115F", destEndpoint: 0x05]) +
+        zigbee.readAttribute(0xFCC0, 0x0200, [mfgCode: "0x115F", destEndpoint: 0x01]) +
+        zigbee.readAttribute(0xFCC0, 0x0200, [mfgCode: "0x115F", destEndpoint: 0x02]) +
+        zigbee.readAttribute(0xFCC0, 0x0285, [mfgCode: "0x115F", destEndpoint: 0x01]) +
+        zigbee.readAttribute(0xFCC0, 0x0285, [mfgCode: "0x115F", destEndpoint: 0x02]) +
+        zigbee.readAttribute(0xFCC0, 0x0203, [mfgCode: "0x115F", destEndpoint: 0x01]) +
+        zigbee.readAttribute(0xFCC0, 0x0203, [mfgCode: "0x115F", destEndpoint: 0x02])
     )
 }
 
 // Commands
+def multiClickButton1(state) { setMultiClickMode("04", state) }
+def multiClickButton2(state) { setMultiClickMode("05", state) }
+def decoupledModeRelay1(state) { setOperationMode("01", state) }
+def decoupledModeRelay2(state) { setOperationMode("02", state) }
+def relayLockRelay1(state) { setLockRelay("01", state) }
+def relayLockRelay2(state) { setLockRelay("02", state) }
+def ledIndicatorRelay1(state) { setLedIndicator("01", state) }
+def ledIndicatorRelay2(state) { setLedIndicator("02", state) }
+
 def setMultiClickMode(ep, state) {
-    int val = (state == "enabled") ? 2 : 1
-    sendHubCommand(new hubitat.device.HubMultiAction(zigbee.writeAttribute(0xFCC0, 0x0286, 0x20, val, [mfgCode: "0x115F", destEndpoint: Integer.parseInt(ep)]), hubitat.device.Protocol.ZIGBEE))
+    int endpoint = Integer.parseInt(ep, 16)
+    boolean enabled = state in ["enabled", "on", true]
+    int val = enabled ? 2 : 1
+    sendHubCommand(new hubitat.device.HubMultiAction(zigbee.writeAttribute(0xFCC0, 0x0286, 0x20, val, [mfgCode: "0x115F", destEndpoint: endpoint]), hubitat.device.Protocol.ZIGBEE))
+    if (endpoint == 4) {
+        updateSettingState("multiClickButton1", enabled ? "on" : "off")
+    } else if (endpoint == 5) {
+        updateSettingState("multiClickButton2", enabled ? "on" : "off")
+    }
 }
 def setOperationMode(ep, mode) {
-    int val = (mode == "decoupled") ? 0 : 1
-    sendHubCommand(new hubitat.device.HubMultiAction(zigbee.writeAttribute(0xFCC0, 0x0200, 0x20, val, [mfgCode: "0x115F", destEndpoint: Integer.parseInt(ep)]), hubitat.device.Protocol.ZIGBEE))
+    int endpoint = Integer.parseInt(ep, 16)
+    boolean decoupled = mode in ["decoupled", "on", true]
+    int val = decoupled ? 0 : 1
+    sendHubCommand(new hubitat.device.HubMultiAction(zigbee.writeAttribute(0xFCC0, 0x0200, 0x20, val, [mfgCode: "0x115F", destEndpoint: endpoint]), hubitat.device.Protocol.ZIGBEE))
+    if (endpoint == 1) {
+        updateSettingState("decoupledModeRelay1", decoupled ? "on" : "off")
+    } else if (endpoint == 2) {
+        updateSettingState("decoupledModeRelay2", decoupled ? "on" : "off")
+    }
 }
 def setLockRelay(ep, state) {
-    int val = (state == "locked") ? 1 : 0
-    sendHubCommand(new hubitat.device.HubMultiAction(zigbee.writeAttribute(0xFCC0, 0x0285, 0x20, val, [mfgCode: "0x115F", destEndpoint: Integer.parseInt(ep)]), hubitat.device.Protocol.ZIGBEE))
+    int endpoint = Integer.parseInt(ep, 16)
+    boolean locked = state in ["locked", "on", true]
+    int val = locked ? 1 : 0
+    sendHubCommand(new hubitat.device.HubMultiAction(zigbee.writeAttribute(0xFCC0, 0x0285, 0x20, val, [mfgCode: "0x115F", destEndpoint: endpoint]), hubitat.device.Protocol.ZIGBEE))
+    if (endpoint == 1) {
+        updateSettingState("relayLockRelay1", locked ? "on" : "off")
+    } else if (endpoint == 2) {
+        updateSettingState("relayLockRelay2", locked ? "on" : "off")
+    }
 }
 def setLedIndicator(ep, state) {
-    int val = (state == "on") ? 1 : 0
-    sendHubCommand(new hubitat.device.HubMultiAction(zigbee.writeAttribute(0xFCC0, 0x0203, 0x10, val, [mfgCode: "0x115F", destEndpoint: Integer.parseInt(ep)]), hubitat.device.Protocol.ZIGBEE))
+    int endpoint = Integer.parseInt(ep, 16)
+    boolean enabled = state in ["on", true]
+    int val = enabled ? 1 : 0
+    sendHubCommand(new hubitat.device.HubMultiAction(zigbee.writeAttribute(0xFCC0, 0x0203, 0x10, val, [mfgCode: "0x115F", destEndpoint: endpoint]), hubitat.device.Protocol.ZIGBEE))
+    if (endpoint == 1) {
+        updateSettingState("ledIndicatorRelay1", enabled ? "on" : "off")
+    } else if (endpoint == 2) {
+        updateSettingState("ledIndicatorRelay2", enabled ? "on" : "off")
+    }
 }
-def configure() { return ["he raw 0x${device.deviceNetworkId} 1 0x01 0x0000 {10 00 01 05 00 07 00 42 12 6C 75 6D 69 2E 73 77 69 74 63 68 2E 61 67 6C 30 31 30}"] }
+def configure() {
+    log.info "Configuring Aqara H2 EU..."
+    createChildDevices()
+    return ["he raw 0x${device.deviceNetworkId} 1 0x01 0x0000 {10 00 01 05 00 07 00 42 12 6C 75 6D 69 2E 73 77 69 74 63 68 2E 61 67 6C 30 31 30}"]
+}
+def getInfo() {
+    log.info "Getting device info..."
+    return zigbee.readAttribute(0x0000, 0x0004) + zigbee.readAttribute(0x0000, 0x0005)
+}
 def sendButtonEvent(btn, type) { sendEvent(name: type, value: btn, isStateChange: true) }
 def on() { componentOn(getChildDevice("${device.deviceNetworkId}-ep01")) }
 def off() { componentOff(getChildDevice("${device.deviceNetworkId}-ep01")) }
 def componentOn(cd) { sendHubCommand(new hubitat.device.HubAction("he cmd 0x${device.deviceNetworkId} 0x${cd.deviceNetworkId.split("-ep")[-1]} 0x0006 1 {}", hubitat.device.Protocol.ZIGBEE)) }
 def componentOff(cd) { sendHubCommand(new hubitat.device.HubAction("he cmd 0x${device.deviceNetworkId} 0x${cd.deviceNetworkId.split("-ep")[-1]} 0x0006 0 {}", hubitat.device.Protocol.ZIGBEE)) }
-def createChildDevices() { [1, 2].each { ep -> String dni = "${device.deviceNetworkId}-ep0${ep}"; if (!getChildDevice(dni)) addChildDevice("hubitat", "Generic Component Switch", dni, [name: "${device.displayName} (Relay ${ep})", isComponent: true]) } }
+def componentRefresh(cd) { refresh() }
+def createChildDevices() {
+    [1, 2].each { ep ->
+        String dni = "${device.deviceNetworkId}-ep0${ep}"
+        if (!getChildDevice(dni)) {
+            log.info "Creating child device for Relay ${ep}"
+            addChildDevice("hubitat", "Generic Component Switch", dni, [name: "${device.displayName} (Relay ${ep})", isComponent: true])
+        } else {
+            log.debug "Child device for Relay ${ep} already exists"
+        }
+    }
+}
