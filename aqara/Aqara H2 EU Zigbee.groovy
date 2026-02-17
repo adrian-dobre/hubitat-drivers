@@ -7,7 +7,7 @@
  * Features:
  * - Dual relay control with child devices
  * - Power, voltage, current, energy monitoring
- * - Multi-click button support (push, double-tap, hold)
+ * - Multi-click button support (push, double-tap, hold) for 4 buttons
  * - Configurable modes: decoupled mode, relay lock, LED indicators
  * - Power outage counter
  * - Temperature sensor
@@ -76,12 +76,13 @@ metadata {
 
 def installed() {
     log.info "Aqara H2 EU installed"
-    sendEvent(name: "numberOfButtons", value: 2)
+    sendEvent(name: "numberOfButtons", value: 4)
     createChildDevices()
 }
 
 def updated() {
     log.info "Aqara H2 EU updated"
+    sendEvent(name: "numberOfButtons", value: 4)
     createChildDevices()
     
     // Auto-disable debug logging after 30 minutes
@@ -133,14 +134,16 @@ def parse(String description) {
         decodeElectricalMeasurement(descMap)
     }
     
-    // 4. MULTI-CLICK BUTTONS
+    // 4. MULTI-CLICK BUTTONS (EP1->Btn1, EP2->Btn2, EP4->Btn3, EP5->Btn4)
     else if (cluster == "0012") {
         int ep = Integer.parseInt(descMap.endpoint, 16)
-        int btn = (ep == 1 || ep == 4) ? 1 : 2
-        int val = Integer.parseInt(descMap.value, 16)
-        if (val == 1) sendButtonEvent(btn, "pushed")
-        else if (val == 2) sendButtonEvent(btn, "doubleTapped")
-        else if (val == 0) sendButtonEvent(btn, "held")
+        Integer btn = [1: 1, 2: 2, 4: 3, 5: 4][ep]
+        if (btn != null) {
+            int val = Integer.parseInt(descMap.value, 16)
+            if (val == 1) sendButtonEvent(btn, "pushed")
+            else if (val == 2) sendButtonEvent(btn, "doubleTapped")
+            else if (val == 0) sendButtonEvent(btn, "held")
+        }
     }
     
     // 5. RELAY STATUS
