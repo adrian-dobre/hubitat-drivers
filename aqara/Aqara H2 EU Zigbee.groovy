@@ -1,7 +1,7 @@
 /**
- * Aqara H2 EU (WS-K08E) - v21.0
- * FIXED: Removed 0x0201 to stop 0x86 errors.
- * FIXED: Enforced Operation Mode on EP 01/02 with Z2M correct types.
+ * Aqara H2 EU (WS-K08E) - v29.0
+ * CORE: Preserved v21.0 logic for Lock, Detach, and LED.
+ * ADDED: Restored v12.0 Multi-Click command and button parsing.
  */
 
 metadata {
@@ -18,6 +18,10 @@ metadata {
         
         attribute "amperage", "number"
         
+        // --- ADDED FROM V12 ---
+        command "setMultiClickMode", [[name: "Endpoint", type: "ENUM", constraints: ["01", "02", "04", "05"]], [name: "State", type: "ENUM", constraints: ["enabled", "disabled"]]]
+        
+        // --- PRESERVED FROM V21 ---
         command "setOperationMode", [[name: "Endpoint", type: "ENUM", constraints: ["01", "02"]], [name: "Mode", type: "ENUM", constraints: ["control", "decoupled"]]]
         command "setLockRelay", [[name: "Endpoint", type: "ENUM", constraints: ["01", "02"]], [name: "State", type: "ENUM", constraints: ["unlocked", "locked"]]]
         command "setLedIndicator", [[name: "Endpoint", type: "ENUM", constraints: ["01", "02"]], [name: "State", type: "ENUM", constraints: ["off", "on"]]]
@@ -34,35 +38,38 @@ metadata {
     }
 }
 
-// --- OPERATION MODE (DECOUPLED) ---
+// --- NEW: MULTI-CLICK FROM V12 ---
+def setMultiClickMode(ep, state) {
+    int val = (state == "enabled") ? 2 : 1
+    int endP = Integer.parseInt(ep)
+    log.info "Setting Multi-click on EP ${ep} to ${state} (Attr 0x0286)"
+    def cmds = zigbee.writeAttribute(0xFCC0, 0x0286, 0x20, val, [mfgCode: "0x115F", destEndpoint: endP])
+    sendHubCommand(new hubitat.device.HubMultiAction(cmds, hubitat.device.Protocol.ZIGBEE))
+}
+
+// --- PRESERVED: OPERATION MODE (DECOUPLED) ---
 def setOperationMode(ep, mode) {
     int val = (mode == "decoupled") ? 0 : 1
     int endP = Integer.parseInt(ep)
     log.info "Setting EP ${ep} Operation Mode to ${mode} (Attr 0x0200)"
-    
-    // Z2M ModernExtend for H2 uses Attr 0x0200, Type 0x20 (Uint8)
     def cmds = zigbee.writeAttribute(0xFCC0, 0x0200, 0x20, val, [mfgCode: "0x115F", destEndpoint: endP])
     sendHubCommand(new hubitat.device.HubMultiAction(cmds, hubitat.device.Protocol.ZIGBEE))
 }
 
-// --- RELAY LOCK ---
+// --- PRESERVED: RELAY LOCK ---
 def setLockRelay(ep, state) {
     int val = (state == "locked") ? 1 : 0
     int endP = Integer.parseInt(ep)
     log.info "Setting Relay ${ep} Lock to ${state} (Attr 0x0285)"
-    
-    // Z2M: Attr 0x0285, Type 0x20
     def cmds = zigbee.writeAttribute(0xFCC0, 0x0285, 0x20, val, [mfgCode: "0x115F", destEndpoint: endP])
     sendHubCommand(new hubitat.device.HubMultiAction(cmds, hubitat.device.Protocol.ZIGBEE))
 }
 
-// --- LED CONTROL ---
+// --- PRESERVED: LED CONTROL ---
 def setLedIndicator(ep, state) {
     int val = (state == "on") ? 1 : 0
     int endP = Integer.parseInt(ep)
     log.info "Setting LED EP ${ep} to ${state} (Attr 0x0203)"
-    
-    // Z2M: Attr 0x0203, Type 0x10 (Boolean)
     def cmds = zigbee.writeAttribute(0xFCC0, 0x0203, 0x10, val, [mfgCode: "0x115F", destEndpoint: endP])
     sendHubCommand(new hubitat.device.HubMultiAction(cmds, hubitat.device.Protocol.ZIGBEE))
 }
@@ -80,19 +87,30 @@ def parse(String description) {
     if (logEnable) log.debug "RAW: ${description}"
     def descMap = zigbee.parseDescriptionAsMap(description)
     
+    // 1. Relays (v21 logic)
     if (descMap.cluster == "0006") {
         def ep = descMap.endpoint
         def value = (descMap.value == "01" || descMap.command == "01") ? "on" : "off"
         def child = getChildDevice("${device.deviceNetworkId}-ep${ep}")
         if (child) child.parse([[name: "switch", value: value]])
         if (ep == "01") sendEvent(name: "switch", value: value)
-    } else if (descMap.cluster == "0B04") {
+    } 
+    // 2. Power (v21 logic)
+    else if (descMap.cluster == "0B04") {
         long val = Long.parseLong(descMap.value, 16)
         if (descMap.attrId == "050B") sendEvent(name: "power", value: (val / 10.0), unit: "W")
-    } else if (descMap.cluster == "0012") {
+    } 
+    // 3. Multi-Click Parsing (v12 logic)
+    else if (descMap.cluster == "0012" || descMap.clusterInt == 18) {
         int ep = Integer.parseInt(descMap.endpoint, 16)
         int btn = (ep == 1 || ep == 4) ? 1 : 2
-        sendButtonEvent(btn, "pushed")
+        def rawValue = descMap.value ?: (descMap.data ? descMap.data[0] : null)
+        if (rawValue != null) {
+            int val = Integer.parseInt(rawValue.toString(), 16)
+            if (val == 1) sendButtonEvent(btn, "pushed")
+            else if (val == 2) sendButtonEvent(btn, "doubleTapped")
+            else if (val == 0) sendButtonEvent(btn, "held")
+        }
     }
 }
 
