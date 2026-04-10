@@ -362,18 +362,18 @@ private void parseOnOff(Map descMap, int endpoint) {
         }
 
         if (isBSLR2()) {
-            if (endpoint == 3) {
+            if (endpoint == 1 || endpoint == 3) {
                 sendEvent(name: "switch", value: value)
                 sendEvent(name: "relay_left", value: value)
                 def child = getChildDevice("${device.deviceNetworkId}-relay_left")
                 if (child) child.parse([[name: "switch", value: value]])
-            } else if (endpoint == 4) {
+            } else if (endpoint == 2 || endpoint == 4) {
                 sendEvent(name: "relay_right", value: value)
                 def child = getChildDevice("${device.deviceNetworkId}-relay_right")
                 if (child) child.parse([[name: "switch", value: value]])
             }
         } else {
-            if (endpoint == 2) {
+            if (endpoint == 1 || endpoint == 2) {
                 sendEvent(name: "switch", value: value)
             }
         }
