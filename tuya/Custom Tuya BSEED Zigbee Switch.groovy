@@ -67,6 +67,13 @@ metadata {
         attribute "relay_right_indicator_mode", "enum", ["same", "opposite", "manual"]
         attribute "relay_right_indicator", "enum", ["ON", "OFF"]
 
+        // Power-on behavior attributes (BSLR1)
+        attribute "power_on_behavior", "enum", ["off", "on", "toggle", "previous"]
+
+        // Power-on behavior attributes (BSLR2)
+        attribute "power_on_behavior_relay_left", "enum", ["off", "on", "toggle", "previous"]
+        attribute "power_on_behavior_relay_right", "enum", ["off", "on", "toggle", "previous"]
+
         // Relay state attributes
         attribute "relay_left", "string"
         attribute "relay_right", "string"
@@ -127,6 +134,16 @@ metadata {
         command "setSwitchRightLevelMoveRate", [[name: "switch_right_level_move_rate*", type: "NUMBER",
             description: "Level (dim) move rate in steps per ms", constraints: ["NUMBER"]]]
 
+        // Power-on behavior commands (BSLR1)
+        command "setPowerOnBehavior", [[name: "power_on_behavior*", type: "ENUM", constraints: ["off", "on", "toggle", "previous"],
+            description: "Controls the behavior when the device is powered on after power loss"]]
+
+        // Power-on behavior commands (BSLR2)
+        command "setPowerOnBehaviorRelayLeft", [[name: "power_on_behavior*", type: "ENUM", constraints: ["off", "on", "toggle", "previous"],
+            description: "Controls the behavior when the device is powered on after power loss"]]
+        command "setPowerOnBehaviorRelayRight", [[name: "power_on_behavior*", type: "ENUM", constraints: ["off", "on", "toggle", "previous"],
+            description: "Controls the behavior when the device is powered on after power loss"]]
+
         // Relay indicator commands (BSLR1)
         command "setRelayIndicatorMode", [[name: "relay_indicator_mode*", type: "ENUM", constraints: ["same", "opposite", "manual"],
             description: "Mode for the relay indicator LED"]]
@@ -178,6 +195,7 @@ metadata {
 @Field static final int ATTR_BINDED_MODE = 0xFF05          // Enum8 - bindedMode
 
 // genOnOff attributes
+@Field static final int ATTR_START_UP_ON_OFF = 0x4003      // Enum8 - startUpOnOff (power-on behavior)
 @Field static final int ATTR_RELAY_INDICATOR_MODE = 0xFF01 // Enum8
 @Field static final int ATTR_RELAY_INDICATOR = 0xFF02      // Boolean
 
@@ -216,6 +234,9 @@ metadata {
 
 @Field static final Map RELAY_INDICATOR_MODE_MAP = [0: "same", 1: "opposite", 2: "manual"]
 @Field static final Map RELAY_INDICATOR_MODE_REVERSE = ["same": 0, "opposite": 1, "manual": 2]
+
+@Field static final Map POWER_ON_BEHAVIOR_MAP = [0: "off", 1: "on", 2: "toggle", 255: "previous"]
+@Field static final Map POWER_ON_BEHAVIOR_REVERSE = ["off": 0, "on": 1, "toggle": 2, "previous": 255]
 
 // Button event mapping from press action
 @Field static final Map PRESS_ACTION_BUTTON_EVENT = ["press": "pushed", "long_press": "held"]
@@ -276,12 +297,39 @@ private int getRelayEndpoint(String side = null) {
 // ===== Parse =====
 
 def parse(String description) {
+    // Skip ZDP messages (profile 0000) — bind responses, active endpoints, etc.
+    if (description.startsWith("catchall: 0000")) return
+
+    Map descMap
+    try {
+        descMap = zigbee.parseDescriptionAsMap(description)
+    } catch (e) {
+        if (logEnable) log.debug "Could not parse description: ${e.message}"
+        return
+    }
+
+    // Skip protocol overhead: 04=write attr response, 07=configure reporting response
+    if (descMap.command in ["04", "07"]) return
+
+    // Default response (0B): log status if error, skip otherwise
+    if (descMap.command == "0B") {
+        if (descMap.data?.size() >= 2 && descMap.data[1] != "00") {
+            log.warn "Command ${descMap.data[0]} failed on cluster 0x${descMap.clusterId} with status 0x${descMap.data[1]}"
+        }
+        return
+    }
+
     if (logEnable) log.debug "parse: ${description}"
-    Map descMap = zigbee.parseDescriptionAsMap(description)
 
     int cluster = descMap.clusterInt ?: 0
     int attrId = descMap.attrInt ?: 0
-    int endpoint = descMap.endpoint ? Integer.parseInt(descMap.endpoint, 16) : 0
+    int endpoint = 0
+    try {
+        endpoint = descMap.endpoint ? Integer.parseInt(descMap.endpoint, 16) : 0
+    } catch (e) {
+        if (logEnable) log.debug "Could not parse endpoint '${descMap.endpoint}', skipping"
+        return
+    }
 
     if (cluster == CLUSTER_ON_OFF) {
         parseOnOff(descMap, endpoint)
@@ -327,6 +375,16 @@ private void parseOnOff(Map descMap, int endpoint) {
         }
     }
 
+    // Power-on behavior (genOnOff 0x4003)
+    if (descMap.attrInt == ATTR_START_UP_ON_OFF) {
+        int rawVal = Integer.parseInt(descMap.value, 16)
+        String behavior = POWER_ON_BEHAVIOR_MAP[rawVal]
+        if (behavior) {
+            String attrName = getPowerOnBehaviorAttrName(endpoint)
+            if (attrName) sendEvent(name: attrName, value: behavior)
+        }
+    }
+
     // Relay indicator (genOnOff 0xFF01 and 0xFF02)
     if (descMap.attrInt == ATTR_RELAY_INDICATOR_MODE) {
         String mode = RELAY_INDICATOR_MODE_MAP[Integer.parseInt(descMap.value, 16)]
@@ -339,6 +397,16 @@ private void parseOnOff(Map descMap, int endpoint) {
         String attrName = getRelayIndicatorAttrName(endpoint)
         if (attrName) sendEvent(name: attrName, value: val)
     }
+}
+
+private String getPowerOnBehaviorAttrName(int endpoint) {
+    if (isBSLR2()) {
+        if (endpoint == 3) return "power_on_behavior_relay_left"
+        if (endpoint == 4) return "power_on_behavior_relay_right"
+    } else {
+        if (endpoint == 2) return "power_on_behavior"
+    }
+    return null
 }
 
 private String getRelayIndicatorModeAttrName(int endpoint) {
@@ -552,6 +620,12 @@ private void writeLevelMoveRate(int endpoint, int value) {
     sendZigbeeCommands(zigbee.writeAttribute(CLUSTER_ON_OFF_SWITCH_CFG, ATTR_LEVEL_MOVE_RATE, DATA_TYPE_UINT8, value, [destEndpoint: endpoint]))
 }
 
+private void writePowerOnBehavior(int endpoint, String value) {
+    Integer val = POWER_ON_BEHAVIOR_REVERSE[value]
+    if (val == null) { log.error "Invalid power_on_behavior: ${value}"; return }
+    sendZigbeeCommands(zigbee.writeAttribute(CLUSTER_ON_OFF, ATTR_START_UP_ON_OFF, DATA_TYPE_ENUM8, val, [destEndpoint: endpoint]))
+}
+
 private void writeRelayIndicatorMode(int endpoint, String value) {
     Integer val = RELAY_INDICATOR_MODE_REVERSE[value]
     if (val == null) { log.error "Invalid relay_indicator_mode: ${value}"; return }
@@ -594,6 +668,15 @@ def setSwitchRightLongPressDuration(BigDecimal value) { writeLongPressDuration(2
 def setSwitchRightLevelMoveRate(BigDecimal value) { writeLevelMoveRate(2, value.intValue()) }
 
 // ===== Relay Indicator Commands =====
+
+// ===== Power-on Behavior Commands =====
+
+// BSLR1
+def setPowerOnBehavior(String value) { writePowerOnBehavior(2, value) }
+
+// BSLR2
+def setPowerOnBehaviorRelayLeft(String value) { writePowerOnBehavior(3, value) }
+def setPowerOnBehaviorRelayRight(String value) { writePowerOnBehavior(4, value) }
 
 // BSLR1
 def setRelayIndicatorMode(String value) { writeRelayIndicatorMode(2, value) }
@@ -639,6 +722,8 @@ def refresh() {
         cmds += zigbee.readAttribute(CLUSTER_ON_OFF, ATTR_RELAY_INDICATOR, [destEndpoint: 3])
         cmds += zigbee.readAttribute(CLUSTER_ON_OFF, ATTR_RELAY_INDICATOR_MODE, [destEndpoint: 4])
         cmds += zigbee.readAttribute(CLUSTER_ON_OFF, ATTR_RELAY_INDICATOR, [destEndpoint: 4])
+        cmds += zigbee.readAttribute(CLUSTER_ON_OFF, ATTR_START_UP_ON_OFF, [destEndpoint: 3])
+        cmds += zigbee.readAttribute(CLUSTER_ON_OFF, ATTR_START_UP_ON_OFF, [destEndpoint: 4])
 
         // Global config on switch_left endpoint (1)
         cmds += zigbee.readAttribute(CLUSTER_BASIC, ATTR_DEVICE_CONFIG, [destEndpoint: 1])
@@ -659,6 +744,7 @@ def refresh() {
         cmds += zigbee.readAttribute(CLUSTER_ON_OFF, 0x0000, [destEndpoint: 2])
         cmds += zigbee.readAttribute(CLUSTER_ON_OFF, ATTR_RELAY_INDICATOR_MODE, [destEndpoint: 2])
         cmds += zigbee.readAttribute(CLUSTER_ON_OFF, ATTR_RELAY_INDICATOR, [destEndpoint: 2])
+        cmds += zigbee.readAttribute(CLUSTER_ON_OFF, ATTR_START_UP_ON_OFF, [destEndpoint: 2])
 
         // Global config on switch endpoint (1)
         cmds += zigbee.readAttribute(CLUSTER_BASIC, ATTR_DEVICE_CONFIG, [destEndpoint: 1])
@@ -666,7 +752,7 @@ def refresh() {
         cmds += zigbee.readAttribute(CLUSTER_BASIC, ATTR_MULTI_PRESS_RESET, [destEndpoint: 1])
     }
 
-    return cmds
+    sendZigbeeCommands(cmds, 200)
 }
 
 // ===== Configure =====
@@ -711,8 +797,8 @@ def configure() {
         cmds += zigbee.configureReporting(CLUSTER_ON_OFF, ATTR_RELAY_INDICATOR, DATA_TYPE_BOOLEAN, 0, 3600, 1, [destEndpoint: 2])
     }
 
-    cmds += refresh()
-    return cmds
+    sendZigbeeCommands(cmds, 500)
+    runIn(10, "refresh")
 }
 
 // ===== Child Devices =====
@@ -741,8 +827,10 @@ private void sendZigbeeCmd(String cmd) {
     sendHubCommand(new HubAction(cmd, Protocol.ZIGBEE))
 }
 
-private void sendZigbeeCommands(List<String> cmds) {
-    sendHubCommand(new HubMultiAction(cmds, Protocol.ZIGBEE))
+private void sendZigbeeCommands(List<String> cmds, int interCmdDelay = 0) {
+    if (!cmds) return
+    List<String> toSend = interCmdDelay > 0 ? delayBetween(cmds, interCmdDelay) : cmds
+    sendHubCommand(new HubMultiAction(toSend, Protocol.ZIGBEE))
 }
 
 private String intToHexStr(int value, int width = 1) {
