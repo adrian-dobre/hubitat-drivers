@@ -331,14 +331,18 @@ def parse(String description) {
         return
     }
 
-    if (cluster == CLUSTER_ON_OFF) {
-        parseOnOff(descMap, endpoint)
-    } else if (cluster == CLUSTER_ON_OFF_SWITCH_CFG) {
-        parseSwitchConfig(descMap, endpoint, attrId)
-    } else if (cluster == CLUSTER_MULTISTATE_INPUT) {
-        parsePressAction(descMap, endpoint, attrId)
-    } else if (cluster == CLUSTER_BASIC) {
-        parseBasic(descMap, endpoint, attrId)
+    try {
+        if (cluster == CLUSTER_ON_OFF) {
+            parseOnOff(descMap, endpoint)
+        } else if (cluster == CLUSTER_ON_OFF_SWITCH_CFG) {
+            parseSwitchConfig(descMap, endpoint, attrId)
+        } else if (cluster == CLUSTER_MULTISTATE_INPUT) {
+            parsePressAction(descMap, endpoint, attrId)
+        } else if (cluster == CLUSTER_BASIC) {
+            parseBasic(descMap, endpoint, attrId)
+        }
+    } catch (e) {
+        if (logEnable) log.debug "Error processing message: ${e.message}"
     }
 }
 
@@ -515,14 +519,26 @@ private String getSwitchPrefix(int endpoint) {
 
 def on() {
     if (logEnable) log.debug "on()"
-    int ep = isBSLR2() ? 3 : 2
-    sendZigbeeCmd("he cmd 0x${device.deviceNetworkId} 0x${intToHexStr(ep)} 0x${intToHexStr(CLUSTER_ON_OFF, 2)} 1 {}")
+    if (isBSLR2()) {
+        sendZigbeeCommands([
+            "he cmd 0x${device.deviceNetworkId} 0x${intToHexStr(3)} 0x${intToHexStr(CLUSTER_ON_OFF, 2)} 1 {}",
+            "he cmd 0x${device.deviceNetworkId} 0x${intToHexStr(4)} 0x${intToHexStr(CLUSTER_ON_OFF, 2)} 1 {}"
+        ], 200)
+    } else {
+        sendZigbeeCmd("he cmd 0x${device.deviceNetworkId} 0x${intToHexStr(2)} 0x${intToHexStr(CLUSTER_ON_OFF, 2)} 1 {}")
+    }
 }
 
 def off() {
     if (logEnable) log.debug "off()"
-    int ep = isBSLR2() ? 3 : 2
-    sendZigbeeCmd("he cmd 0x${device.deviceNetworkId} 0x${intToHexStr(ep)} 0x${intToHexStr(CLUSTER_ON_OFF, 2)} 0 {}")
+    if (isBSLR2()) {
+        sendZigbeeCommands([
+            "he cmd 0x${device.deviceNetworkId} 0x${intToHexStr(3)} 0x${intToHexStr(CLUSTER_ON_OFF, 2)} 0 {}",
+            "he cmd 0x${device.deviceNetworkId} 0x${intToHexStr(4)} 0x${intToHexStr(CLUSTER_ON_OFF, 2)} 0 {}"
+        ], 200)
+    } else {
+        sendZigbeeCmd("he cmd 0x${device.deviceNetworkId} 0x${intToHexStr(2)} 0x${intToHexStr(CLUSTER_ON_OFF, 2)} 0 {}")
+    }
 }
 
 // ===== Child Device Commands =====
