@@ -167,10 +167,13 @@ metadata {
 
         // BSLR1 - 1 gang
         fingerprint profileId: "0104", endpointId: "01", inClusters: "0000,0007,0012", outClusters: "0019,0006,0008", manufacturer: "xk5udnd6", model: "BSLR1", deviceJoinName: "Custom Tuya BSEED Zigbee Switch 1-Gang"
+        fingerprint profileId: "0104", endpointId: "01", inClusters: "0000,0020,0007,0012", outClusters: "0019,0006,0008", model: "BSLR1", manufacturer: "aetquff4", deviceJoinName: "Custom Tuya BSEED Zigbee Switch 1-Gang"
+
         // BSLR2 - 2 gang
         fingerprint profileId: "0104", endpointId: "01", inClusters: "0000,0007,0012", outClusters: "0019,0006,0008", manufacturer: "xk5udnd6", model: "BSLR2", deviceJoinName: "Custom Tuya BSEED Zigbee Switch 2-Gang"
         fingerprint profileId: "0104", endpointId: "01", inClusters: "0000,0007,0012", outClusters: "0019,0006,0008", manufacturer: "xk5udnd6", model: "Bseed-2-gang-2", deviceJoinName: "Custom Tuya BSEED Zigbee Switch 2-Gang"
         fingerprint profileId: "0104", endpointId: "01", inClusters: "0000,0007,0012", outClusters: "0019,0006,0008", manufacturer: "xk5udnd6", model: "Bseed-2-gang-2-ED", deviceJoinName: "Custom Tuya BSEED Zigbee Switch 2-Gang"
+        fingerprint profileId: "0104", endpointId: "01", inClusters: "0000,0020,0007,0012", outClusters: "0019,0006,0008", manufacturer: "xk5udnd6", model: "BSLR2", deviceJoinName: "Custom Tuya BSEED Zigbee Switch 2-Gang"
     }
 
     preferences {
